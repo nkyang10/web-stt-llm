@@ -1,0 +1,13 @@
+# Keep secret
+.env
+
+# SSL certs (self-signed, local only)
+cert.pem
+key.pem
+
+# Generated response audio
+static/responses/
+
+# Python cache
+__pycache__/
+*.pyc

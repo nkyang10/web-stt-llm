@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>廣東話語音聊天</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans TC", sans-serif;
+    background: #0f1923;
+    color: #e0e0e0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 22px;
+    margin: 10px 0 5px;
+    color: #4fc3f7;
+    font-weight: 600;
+  }
+  .subtitle {
+    font-size: 13px;
+    color: #78909c;
+    margin-bottom: 20px;
+  }
+
+  /* Toggle button */
+  .toggle-btn {
+    width: 180px;
+    height: 60px;
+    border-radius: 30px;
+    border: 2px solid #4fc3f7;
+    background: #1a2a3a;
+    color: #4fc3f7;
+    font-size: 18px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: manipulation;
+  }
+  .toggle-btn:hover {
+    background: #1e3350;
+  }
+  .toggle-btn.active {
+    background: #e53935;
+    border-color: #e53935;
+    color: #fff;
+    box-shadow: 0 0 20px rgba(229,57,53,0.3);
+  }
+  .toggle-btn:active {
+    transform: scale(0.97);
+  }
+
+  /* Status bar */
+  .status {
+    margin: 15px 0;
+    font-size: 13px;
+    color: #78909c;
+    min-height: 20px;
+  }
+  .status.processing { color: #ffa726; }
+  .status.listening { color: #e53935; }
+  .status.responding { color: #4fc3f7; }
+
+  /* Conversation */
+  .conversation {
+    width: 100%;
+    max-width: 600px;
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 0;
+    margin-top: 10px;
+  }
+  .msg {
+    margin-bottom: 16px;
+    animation: fadeIn 0.3s ease;
+  }
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .msg .who {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .msg.user .who { color: #ffa726; }
+  .msg.ai .who { color: #4fc3f7; }
+  .msg .bubble {
+    display: inline-block;
+    padding: 10px 14px;
+    border-radius: 12px;
+    max-width: 85%;
+    line-height: 1.5;
+    font-size: 15px;
+  }
+  .msg.user .bubble {
+    background: #263238;
+    color: #fff;
+    border-bottom-left-radius: 4px;
+  }
+  .msg.ai .bubble {
+    background: #1a3a4a;
+    color: #e0f7fa;
+    border-bottom-right-radius: 4px;
+  }
+  .msg .time {
+    font-size: 11px;
+    color: #546e7a;
+    margin-top: 2px;
+    padding-left: 2px;
+  }
+
+  /* Scroll to bottom */
+  .conversation::-webkit-scrollbar {
+    width: 4px;
+  }
+  .conversation::-webkit-scrollbar-thumb {
+    background: #37474f;
+    border-radius: 2px;
+  }
+
+  /* Clear button */
+  .clear-btn {
+    background: none;
+    border: 1px solid #37474f;
+    color: #78909c;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    cursor: pointer;
+    margin-top: 5px;
+    transition: all 0.2s;
+  }
+  .clear-btn:hover {
+    border-color: #546e7a;
+    color: #b0bec5;
+  }
+
+  /* Mobile responsive */
+  @media (max-width: 480px) {
+    .toggle-btn { width: 150px; height: 50px; font-size: 16px; }
+    .msg .bubble { max-width: 90%; font-size: 14px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>🎙️ 廣東話語音 Chat</h1>
+<div class="subtitle">㩒掣開始對話・自動感應你講完</div>
+
+
+<!-- Talk toggle button -->
+<button class="toggle-btn" id="toggleBtn" onclick="toggleConversation()">
+  🎙️ 開始對話
+</button>
+
+<div class="status" id="status">㩒「開始對話」就傾得</div>
+
+<button class="clear-btn" id="clearBtn">清除對話</button>
+
+<div class="conversation" id="conversation"></div>
+
+<script>
+// ─── Config ─────────────────────────────────────────────────────────────────
+const VAD_RMS_THRESHOLD = 0.015;    // Voice threshold (RMS)
+const SILENCE_TIMEOUT_MS = 600;     // Shorter silence = utterance end (~0.6s)
+const MIN_UTTERANCE_MS = 300;       // Min voice before accepting
+
+// ─── State ─────────────────────────────────────────────────────────────────
+let audioCtx = null;          // Main AudioContext (recording + VAD)
+let playbackCtx = null;       // Playback context (autoplay-safe)
+let mediaStream = null;
+let sourceNode = null;
+let scriptNode = null;
+
+let isActive = false;         // System is listening
+let isVoiceActive = false;    // Currently detecting voice
+let utterancePCM = [];        // Accumulated PCM for current utterance
+let utteranceStartMs = 0;     // When current utterance started
+let lastVoiceMs = 0;          // Last time voice was detected
+let playbackCooldown = 0;     // Timestamp when AI last started speaking (anti-echo)
+let vadTimer = null;          // Silence-check interval
+let sr = 48000;
+
+const statusEl = document.getElementById('status');
+const convEl = document.getElementById('conversation');
+const toggleBtn = document.getElementById('toggleBtn');
+const clearBtn = document.getElementById('clearBtn');
+
+// ─── VAD: RMS-based voice detection ────────────────────────────────────────
+function calcRMS(samples) {
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  return Math.sqrt(sum / samples.length);
+}
+
+function onAudioProcess(event) {
+  if (!isActive) return;
+  // Skip 300ms after AI playback starts (anti-echo — don't process AI's own voice)
+  if (Date.now() - playbackCooldown < 300) return;
+  const input = event.inputBuffer.getChannelData(0);
+  const rms = calcRMS(input);
+  const now = Date.now();
+
+  if (rms > VAD_RMS_THRESHOLD) {
+    // Voice detected
+    if (!isVoiceActive) {
+      isVoiceActive = true;
+      utteranceStartMs = now;
+      utterancePCM = [];
+    }
+    utterancePCM.push(new Float32Array(input));
+    lastVoiceMs = now;
+  }
+  // Always keep collecting — even during processing / playback
+}
+
+// ─── Silence checker (every 200ms — shorter interval for responsiveness) ───
+function checkSilence() {
+  if (!isActive) return;
+  if (!isVoiceActive) return;
+
+  const now = Date.now();
+  const sinceLastVoice = now - lastVoiceMs;
+
+  if (sinceLastVoice > SILENCE_TIMEOUT_MS) {
+    const utteranceMs = lastVoiceMs - utteranceStartMs;
+    if (utteranceMs < MIN_UTTERANCE_MS) {
+      // Too short, discard
+      isVoiceActive = false;
+      utterancePCM = [];
+      return;
+    }
+
+    // Send immediately (fire-and-forget — parallel API calls)
+    const pcmCopy = utterancePCM.slice();
+    sendToBackend(pcmCopy);
+
+    // Reset for next utterance
+    isVoiceActive = false;
+    utterancePCM = [];
+
+    setStatus('listening', '🎤 聽緊… (處理中)');
+  }
+}
+
+// ─── Send PCM to backend (parallel — no queue, no blocking) ────────────────
+async function sendToBackend(pcmData) {
+  const msgId = Date.now();
+
+  // Show placeholder
+  addMessage('user', '🎤 錄音中…');
+
+  try {
+    const blob = encodeWav(pcmData, sr);
+    const formData = new FormData();
+    formData.append('audio', blob, `voice_${msgId}.wav`);
+
+    const resp = await fetch('/api/chat', { method: 'POST', body: formData });
+    if (!resp.ok) throw new Error(`Server error: ${resp.status}`);
+
+    const data = await resp.json();
+
+    // Update user message
+    updateLastMessage('user', data.transcribed || '(聽唔到)');
+
+    if (data.audio_url) {
+      addMessage('ai', data.response);
+
+      // Play response — multiple playbacks can overlap
+      setPlaybackCooldown();
+      await playAudio(data.audio_url);
+    } else {
+      addMessage('ai', data.response);
+    }
+  } catch (err) {
+    addMessage('ai', `⚠️ 錯誤：${err.message}`);
+  }
+}
+
+function setPlaybackCooldown() {
+  playbackCooldown = Date.now();
+}
+
+// ─── Encode PCM → WAV blob ─────────────────────────────────────────────────
+function encodeWav(samples, sampleRate) {
+  let totalLen = 0;
+  for (const chunk of samples) totalLen += chunk.length;
+  const merged = new Float32Array(totalLen);
+  let offset = 0;
+  for (const chunk of samples) { merged.set(chunk, offset); offset += chunk.length; }
+
+  const numSamples = merged.length;
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+
+  const writeStr = (off, str) => {
+    for (let i = 0; i < str.length; i++)
+      view.setUint8(off + i, str.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, merged[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+// ─── Audio Playback (AudioContext-based for autoplay) ──────────────────────
+async function playAudio(url) {
+  if (!playbackCtx) return;
+  try {
+    const resp = await fetch(url);
+    const arrayBuf = await resp.arrayBuffer();
+    const audioBuf = await playbackCtx.decodeAudioData(arrayBuf);
+    const source = playbackCtx.createBufferSource();
+    source.buffer = audioBuf;
+    source.connect(playbackCtx.destination);
+    source.start(0);
+    return new Promise((resolve) => { source.onended = () => resolve(); });
+  } catch (err) {
+    console.error('Playback error:', err);
+  }
+}
+
+// ─── Start / Stop conversation ─────────────────────────────────────────────
+async function toggleConversation() {
+  if (isActive) {
+    stopConversation();
+    return;
+  }
+  await startConversation();
+}
+
+async function startConversation() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    sr = 48000;
+
+    // Create main audio context
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+
+    // Create/resume playback context (user gesture → autoplay allowed)
+    if (!playbackCtx || playbackCtx.state === 'closed') {
+      playbackCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (playbackCtx.state === 'suspended') await playbackCtx.resume();
+
+    // ScriptProcessor for PCM capture
+    scriptNode = audioCtx.createScriptProcessor(4096, 1, 1);
+    scriptNode.onaudioprocess = onAudioProcess;
+
+    sourceNode.connect(scriptNode);
+    scriptNode.connect(audioCtx.destination);
+
+    // Start silence checker
+    isActive = true;
+    utterancePCM = [];
+    isVoiceActive = false;
+    vadTimer = setInterval(checkSilence, 200);
+
+    toggleBtn.textContent = '⏹ 停止對話';
+    toggleBtn.classList.add('active');
+    setStatus('listening', '🎤 聽緊…');
+  } catch (err) {
+    setStatus('idle', '⚠️ 咪高峰存取被拒');
+    console.error(err);
+  }
+}
+
+function stopConversation() {
+  isActive = false;
+  isVoiceActive = false;
+  if (vadTimer) { clearInterval(vadTimer); vadTimer = null; }
+
+  // Clean up audio
+  if (scriptNode) { scriptNode.disconnect(); scriptNode = null; }
+  if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+  if (audioCtx) { audioCtx.close().catch(()=>{}); audioCtx = null; }
+  if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+
+  // Don't close playbackCtx
+  utterancePCM = [];
+  isVoiceActive = false;
+
+  toggleBtn.textContent = '🎙️ 開始對話';
+  toggleBtn.classList.remove('active');
+  setStatus('idle', '已停止');
+}
+
+// ─── UI Helpers ─────────────────────────────────────────────────────────────
+function setStatus(type, text) {
+  statusEl.textContent = text;
+  statusEl.className = 'status ' + type;
+}
+
+function addMessage(who, text) {
+  const now = new Date();
+  const time = now.toLocaleTimeString('zh-HK', { hour: '2-digit', minute: '2-digit' });
+  const div = document.createElement('div');
+  div.className = `msg ${who}`;
+  div.innerHTML = `
+    <div class="who">${who === 'user' ? '🧑 你' : '🤖 AI'}</div>
+    <div class="bubble">${escapeHtml(text)}</div>
+    <div class="time">${time}</div>
+  `;
+  convEl.appendChild(div);
+  convEl.scrollTop = convEl.scrollHeight;
+}
+
+function updateLastMessage(who, text) {
+  const msgs = convEl.querySelectorAll(`.msg.${who}`);
+  if (msgs.length === 0) return;
+  const last = msgs[msgs.length - 1];
+  last.querySelector('.bubble').innerHTML = escapeHtml(text);
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+clearBtn.addEventListener('click', () => { convEl.innerHTML = ''; });
+</script>
+
+</body>
+</html>
